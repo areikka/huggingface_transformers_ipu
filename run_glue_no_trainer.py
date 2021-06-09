@@ -436,12 +436,15 @@ def main():
         model.train()
         for step, batch in enumerate(train_dataloader):
             input_ids = batch['input_ids']
+            attention_mask = batch['attention_mask']
+            labels = batch['labels']
+            total_batch_size = input_ids.size(0)
             eos_index = (input_ids==2).nonzero()
             eos_index = eos_index.view(total_batch_size, -1, eos_index.size(-1))[:,-1,:]
             eos_index = eos_index[:,1]
-            size = input_ids.size(1)
+            length = input_ids.size(1)
             for i in range(len(eos_index)):
-                eos_index[i] += size*i
+                eos_index[i] += length*i
 
             batch['eos_index'] = eos_index
             loss = model(**batch)

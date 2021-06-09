@@ -251,7 +251,7 @@ class ModelWrapper(nn.Module):
     def pipeline_mapping(self):
         print("---------- Device Allocation -----------")
         print("Embedding  --> IPU 0")
-        layer_ipu = [0]*3 + [1]*7 + [2]*7 + [3]*7
+        layer_ipu = [0]*0 + [1]*8 + [2]*8 + [3]*8
         index_offset = 0
         self.model.model.encoder.embed_positions = poptorch.BeginBlock(
             self.model.model.encoder.embed_positions, "Embedding0", ipu_id=0)
@@ -547,7 +547,7 @@ def main():
             eos_index = eos_index[:,1]
             length = input_ids.size(1)
             for i in range(len(eos_index)):
-                eos_index[i] += total_batch_size*i
+                eos_index[i] += length*i
 
             # outputs = poptorch_model(**batch)
             # pdb.set_trace()
