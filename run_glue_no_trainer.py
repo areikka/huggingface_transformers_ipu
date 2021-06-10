@@ -39,6 +39,7 @@ from transformers import (
     set_seed,
 )
 
+import time
 from src.transformers.models.bart.modeling_bart import BartForSequenceClassification
 
 logger = logging.getLogger(__name__)
@@ -430,10 +431,10 @@ def main():
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
-    completed_steps = 0
-
+    completed_steps = 0  
     for epoch in range(args.num_train_epochs):
         model.train()
+        time_end = time.time()
         for step, batch in enumerate(train_dataloader):
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
@@ -445,6 +446,7 @@ def main():
             length = input_ids.size(1)
             for i in range(len(eos_index)):
                 eos_index[i] += length*i
+
 
             batch['eos_index'] = eos_index
             loss = model(**batch)
@@ -459,43 +461,44 @@ def main():
 
             if completed_steps >= args.max_train_steps:
                 break
+            print("{} samples cost {}s. Throughput: {}".format(total_batch_size, time.time()-time_end, total_batch_size/(time.time()-time_end)))
+            time_end = time.time()
+        # model.eval()
+        # for step, batch in enumerate(eval_dataloader):
+        #     outputs = model(**batch)
+        #     predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
+        #     metric.add_batch(
+        #         predictions=accelerator.gather(predictions),
+        #         references=accelerator.gather(batch["labels"]),
+        #     )
 
-        model.eval()
-        for step, batch in enumerate(eval_dataloader):
-            outputs = model(**batch)
-            predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
-            metric.add_batch(
-                predictions=accelerator.gather(predictions),
-                references=accelerator.gather(batch["labels"]),
-            )
+        # eval_metric = metric.compute()
+        # logger.info(f"epoch {epoch}: {eval_metric}")
 
-        eval_metric = metric.compute()
-        logger.info(f"epoch {epoch}: {eval_metric}")
+    # if args.output_dir is not None:
+    #     accelerator.wait_for_everyone()
+    #     unwrapped_model = accelerator.unwrap_model(model)
+    #     unwrapped_model.save_pretrained(args.output_dir, save_function=accelerator.save)
 
-    if args.output_dir is not None:
-        accelerator.wait_for_everyone()
-        unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(args.output_dir, save_function=accelerator.save)
+    # if args.task_name == "mnli":
+    #     # Final evaluation on mismatched validation set
+    #     eval_dataset = processed_datasets["validation_mismatched"]
+    #     eval_dataloader = DataLoader(
+    #         eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
+    #     )
+    #     eval_dataloader = accelerator.prepare(eval_dataloader)
 
-    if args.task_name == "mnli":
-        # Final evaluation on mismatched validation set
-        eval_dataset = processed_datasets["validation_mismatched"]
-        eval_dataloader = DataLoader(
-            eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
-        )
-        eval_dataloader = accelerator.prepare(eval_dataloader)
+    #     model.eval()
+    #     for step, batch in enumerate(eval_dataloader):
+    #         outputs = model(**batch)
+    #         predictions = outputs.logits.argmax(dim=-1)
+    #         metric.add_batch(
+    #             predictions=accelerator.gather(predictions),
+    #             references=accelerator.gather(batch["labels"]),
+    #         )
 
-        model.eval()
-        for step, batch in enumerate(eval_dataloader):
-            outputs = model(**batch)
-            predictions = outputs.logits.argmax(dim=-1)
-            metric.add_batch(
-                predictions=accelerator.gather(predictions),
-                references=accelerator.gather(batch["labels"]),
-            )
-
-        eval_metric = metric.compute()
-        logger.info(f"mnli-mm: {eval_metric}")
+    #     eval_metric = metric.compute()
+    #     logger.info(f"mnli-mm: {eval_metric}")
 
 
 if __name__ == "__main__":
