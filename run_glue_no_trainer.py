@@ -23,9 +23,10 @@ import datasets
 from datasets import load_dataset, load_metric
 from torch.utils.data.dataloader import DataLoader
 from tqdm.auto import tqdm
+import torch
 from torch import nn
 import transformers
-from accelerate import Accelerator
+# from accelerate import Accelerator
 from transformers import (
     AdamW,
     AutoConfig,
@@ -140,7 +141,7 @@ def parse_args():
         "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument("--seed", type=int, default=42, help="A seed for reproducible training.")
     args = parser.parse_args()
 
     # Sanity checks
@@ -159,17 +160,36 @@ def parse_args():
 
     return args
 
+class SplitEmbedding(nn.Module):
+    def __init__(self, args, config, embedding_model):
+        super().__init__()
+        self.dim = config.d_model//2
+        self.config = config
+        self.args = args
+        self.embed0 = nn.Embedding(config.vocab_size, self.dim, config.pad_token_id)
+        self.embed1 = nn.Embedding(config.vocab_size, self.dim, config.pad_token_id)
+        self.embed0.weight = nn.parameter.Parameter(embedding_model.weight[:,:self.dim])
+        self.embed1.weight = nn.parameter.Parameter(embedding_model.weight[:,self.dim:])
+
+    def forward(self, input_ids):
+        return torch.cat((self.embed0(input_ids), self.embed1(input_ids)), dim=2) 
+
+
 class ModelWrapper(nn.Module):
     # Required because poptorch does not support default args in the model.
     def __init__(self, args, config):
         super().__init__()
         # self.model = GPT2ForSequenceClassification.from_pretrained(model_name)]
         self.args = args
+        # self.model = BartForSequenceClassification(config)
         self.model = BartForSequenceClassification.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
-            config="bart-base/config.json",
+            config=os.path.join(args.model_name_or_path, 'config.json'),
         )
+        self.model.model.shared = SplitEmbedding(args, config, self.model.model.shared)
+        self.model.model.base_model.decoder.embed_tokens = self.model.model.shared
+        self.model.model.base_model.encoder.embed_tokens = self.model.model.shared
         self.config = config
         self.resize_token_embeddings = self.model.resize_token_embeddings
         self.loss_fct = nn.CrossEntropyLoss()
@@ -209,24 +229,27 @@ def main():
     args = parse_args()
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
-    accelerator = Accelerator()
+    # accelerator = Accelerator()
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
-    logger.info(accelerator.state)
+    # logger.info(accelerator.state)
 
     # Setup logging, we only want one process per machine to log things on the screen.
     # accelerator.is_local_main_process is only True for one process per machine.
-    logger.setLevel(logging.INFO if accelerator.is_local_main_process else logging.ERROR)
-    if accelerator.is_local_main_process:
-        datasets.utils.logging.set_verbosity_warning()
-        transformers.utils.logging.set_verbosity_info()
-    else:
-        datasets.utils.logging.set_verbosity_error()
-        transformers.utils.logging.set_verbosity_error()
+    logger.setLevel(logging.INFO) # if accelerator.is_local_main_process else logging.ERROR)
+    # if accelerator.is_local_main_process:
+    #     datasets.utils.logging.set_verbosity_warning()
+    #     transformers.utils.logging.set_verbosity_info()
+    # else:
+    #     datasets.utils.logging.set_verbosity_error()
+    #     transformers.utils.logging.set_verbosity_error()
+
+    datasets.utils.logging.set_verbosity_error()
+    transformers.utils.logging.set_verbosity_error()
 
     # If passed along, set the training seed now.
     if args.seed is not None:
@@ -286,6 +309,10 @@ def main():
     config = AutoConfig.from_pretrained(args.model_name_or_path, num_labels=num_labels, finetuning_task=args.task_name)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenizer)
     model = ModelWrapper(args, config)
+    if torch.cuda.device_count() > 1:
+        print("Let's use", torch.cuda.device_count(), "GPUs!")
+        # 就这一行
+        model = nn.DataParallel(model)
 
     # model = BartForSequenceClassification.from_pretrained(
     #     args.model_name_or_path,
@@ -392,9 +419,9 @@ def main():
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
 
     # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader
-    )
+    # model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+    #     model, optimizer, train_dataloader, eval_dataloader
+    # )
 
     # Note -> the training dataloader needs to be prepared before we grab his length below (cause its length will be
     # shorter in multiprocess)
@@ -420,7 +447,8 @@ def main():
         metric = load_metric("accuracy")
 
     # Train!
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    # total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    total_batch_size = args.per_device_train_batch_size * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
@@ -430,7 +458,7 @@ def main():
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(args.max_train_steps)) #, disable=not accelerator.is_local_main_process)
     completed_steps = 0  
     for epoch in range(args.num_train_epochs):
         model.train()
@@ -451,7 +479,8 @@ def main():
             batch['eos_index'] = eos_index
             loss = model(**batch)
             loss = loss / args.gradient_accumulation_steps
-            accelerator.backward(loss)
+            loss.backward()
+            # accelerator.backward(loss)
             if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                 optimizer.step()
                 lr_scheduler.step()
