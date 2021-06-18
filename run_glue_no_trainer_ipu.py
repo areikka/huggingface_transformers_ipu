@@ -39,6 +39,7 @@ from transformers import (
     set_seed,
 )
 
+import torch
 from torch import nn
 import poptorch
 from poptorch import trainingModel, DataLoader, inferenceModel
@@ -154,7 +155,7 @@ def parse_args():
     parser.add_argument("--matmul_proportion", type=float, nargs="+",default=  [0.2, 0.2, 0.2, 0.2],
                         help="Relative IPU memory proportion size allocated for matmul")
     parser.add_argument("--gradient_accumulation",
-                        dest='gradient_accumulation', default=9)
+                        dest='gradient_accumulation', default=13)
     parser.add_argument("--batches_per_step",
                         dest='batches_per_step', type=float, default=1)
     parser.add_argument("--steps_per_logs",
@@ -201,17 +202,39 @@ def parse_args():
 
     return args
 
+class SplitEmbedding(nn.Module):
+    def __init__(self, args, config, embedding_model):
+        super().__init__()
+        self.dim = config.d_model//3
+        self.config = config
+        self.args = args
+        self.embed0 = nn.Embedding(config.vocab_size, self.dim, config.pad_token_id)
+        self.embed1 = nn.Embedding(config.vocab_size, self.dim, config.pad_token_id)
+        self.embed2 = nn.Embedding(config.vocab_size, self.dim, config.pad_token_id)
+
+        self.embed0.weight = nn.parameter.Parameter(embedding_model.weight[:,:self.dim])
+        self.embed1.weight = nn.parameter.Parameter(embedding_model.weight[:,self.dim:2*self.dim])
+        self.embed2.weight = nn.parameter.Parameter(embedding_model.weight[:,2*self.dim:])
+
+    def forward(self, input_ids):
+        return torch.cat((self.embed0(input_ids), self.embed1(input_ids), self.embed2(input_ids)), dim=2) 
+
+
 class ModelWrapper(nn.Module):
     # Required because poptorch does not support default args in the model.
     def __init__(self, args, config):
         super().__init__()
         # self.model = GPT2ForSequenceClassification.from_pretrained(model_name)]
         self.args = args
+        # self.model = BartForSequenceClassification(config)
         self.model = BartForSequenceClassification.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config="bart-base/config.json",
         )
+        self.model.model.shared = SplitEmbedding(args, config, self.model.model.shared)
+        self.model.model.base_model.decoder.embed_tokens = self.model.model.shared
+        self.model.model.base_model.encoder.embed_tokens = self.model.model.shared
         self.config = config
         self.resize_token_embeddings = self.model.resize_token_embeddings
         self.loss_fct = nn.CrossEntropyLoss()
@@ -251,22 +274,29 @@ class ModelWrapper(nn.Module):
     def pipeline_mapping(self):
         print("---------- Device Allocation -----------")
         print("Embedding  --> IPU 0")
-        layer_ipu = [0]*0 + [1]*8 + [2]*8 + [3]*8
+        layer_ipu = [0]*3 + [1]*3 + [2]*3 + [3]*15
         index_offset = 0
-        self.model.model.encoder.embed_positions = poptorch.BeginBlock(
-            self.model.model.encoder.embed_positions, "Embedding0", ipu_id=0)
-        print("encoder.embed_positions --> IPU 0")
-        self.model.model.encoder.embed_tokens = poptorch.BeginBlock(
-            self.model.model.encoder.embed_tokens, "Embedding1", ipu_id=0)
-        print("encoder.embed_tokens --> IPU 0")
         self.model.model.encoder.layernorm_embedding = poptorch.BeginBlock(
-            self.model.model.encoder.layernorm_embedding, "Embedding2", ipu_id=0)
+            self.model.model.encoder.layernorm_embedding, "Embedding_ln", ipu_id=0)
         print("encoder.layernorm_embedding --> IPU 0")
         self.model.classification_head = poptorch.BeginBlock(
             self.model.classification_head, "Classification", ipu_id=0)
         self.loss_fct = poptorch.BeginBlock(
             self.loss_fct, "Loss", ipu_id=0)
         print("sentence_classification_head --> IPU 0")
+
+
+        self.model.model.shared.embed0 = poptorch.BeginBlock(
+            self.model.model.shared.embed0, "Embedding0", ipu_id=0)
+        self.model.model.shared.embed1 = poptorch.BeginBlock(
+            self.model.model.shared.embed1, "Embedding1", ipu_id=1)
+        self.model.model.shared.embed2 = poptorch.BeginBlock(
+            self.model.model.shared.embed2, "Embedding2", ipu_id=2)
+
+        self.model.model.encoder.embed_positions = poptorch.BeginBlock(
+            self.model.model.encoder.embed_positions, "Embedding_pos", ipu_id=2)
+        print("encoder.embed_positions --> IPU 0")
+
         for index, layer in enumerate(self.model.model.encoder.layers):
             ipu = layer_ipu[index+index_offset]
             self.model.model.encoder.layers[index] = poptorch.BeginBlock(
@@ -534,7 +564,7 @@ def main():
     progress_bar = tqdm(range(args.max_train_steps))
     completed_steps = 0
 
-    # pipeline_mapping(model)
+    # model.pipeline_mapping()
     for epoch in range(args.num_train_epochs):
         # model.train()
         for step, batch in enumerate(train_dataloader):           

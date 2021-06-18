@@ -15,6 +15,7 @@
 """ PyTorch BART model. """
 import copy
 import math
+import pdb
 import random
 import warnings
 from typing import Optional, Tuple
@@ -45,7 +46,7 @@ from ...modeling_outputs import (
 from ...modeling_utils import PreTrainedModel
 from ...utils import logging
 from .configuration_bart import BartConfig
-import pdb
+
 
 logger = logging.get_logger(__name__)
 
@@ -1104,6 +1105,9 @@ class BartDecoder(BartPretrainedModel):
             cross_attentions=all_cross_attentions,
         )
 
+# class SplitEmbedding(nn.Module):
+#     super().__init__()
+#     self.
 
 @add_start_docstrings(
     "The bare BART Model outputting raw hidden-states without any specific head on top.",
@@ -1120,6 +1124,7 @@ class BartModel(BartPretrainedModel):
         self.decoder = BartDecoder(config, self.shared)
 
         self.init_weights()
+        x=1
 
     def get_input_embeddings(self):
         return self.shared
